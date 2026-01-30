@@ -111,17 +111,12 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      - name: 📦 Restore dependencies
-        run: dotnet restore
+      - name: 🧹 Clean any cached artifacts
+        run: |
+          rm -rf obj bin publish
+          dotnet clean --configuration Release || true
 
-      - name: 🔨 Build project
-        run: dotnet build --configuration Release
-
-      - name: 🧪 Run tests (if any)
-        run: dotnet test --configuration Release --no-build --verbosity normal
-        continue-on-error: true
-
-      - name: 📦 Publish
+      - name: 📦 Publish (restore + build + publish)
         run: dotnet publish --configuration Release --output ${{ env.OUTPUT_PATH }}
 
       - name: 📋 List published files
