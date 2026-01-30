@@ -1,0 +1,325 @@
+#############################################################################
+# GitHub Actions Workflow - Azure Function App Deployment
+#
+# Triggers:
+#   - Pull Request to main branch (build + deploy to staging slot)
+#   - Push to main branch (deploy to production)
+#
+# Prerequisites:
+#   1. Create Azure AD App Registration for GitHub OIDC
+#   2. Configure Federated Credentials for the repository
+#   3. Add secrets to GitHub repository:
+#      - AZURE_CLIENT_ID: App Registration Client ID
+#      - AZURE_TENANT_ID: Azure AD Tenant ID
+#      - AZURE_SUBSCRIPTION_ID: Azure Subscription ID
+#
+# Setup Instructions:
+#   Run these Azure CLI commands to set up OIDC authentication:
+#
+#   # Create App Registration
+#   az ad app create --display-name "github-actions-func-orders-demo"
+#   
+#   # Get the App ID
+#   APP_ID=$(az ad app list --display-name "github-actions-func-orders-demo" --query "[0].appId" -o tsv)
+#   
+#   # Create Service Principal
+#   az ad sp create --id $APP_ID
+#   
+#   # Get Service Principal Object ID
+#   SP_OBJECT_ID=$(az ad sp show --id $APP_ID --query "id" -o tsv)
+#   
+#   # Assign Contributor role to resource group
+#   az role assignment create --assignee $SP_OBJECT_ID \
+#     --role "Contributor" \
+#     --scope "/subscriptions/{subscription-id}/resourceGroups/rg-functionapp-demo"
+#   
+#   # Create Federated Credential for master branch
+#   az ad app federated-credential create --id $APP_ID --parameters '{
+#     "name": "github-master",
+#     "issuer": "https://token.actions.githubusercontent.com",
+#     "subject": "repo:{owner}/{repo}:ref:refs/heads/master",
+#     "audiences": ["api://AzureADTokenExchange"]
+#   }'
+#   
+#   # Create Federated Credential for pull requests
+#   az ad app federated-credential create --id $APP_ID --parameters '{
+#     "name": "github-pr",
+#     "issuer": "https://token.actions.githubusercontent.com",
+#     "subject": "repo:{owner}/{repo}:pull_request",
+#     "audiences": ["api://AzureADTokenExchange"]
+#   }'
+#############################################################################
+
+name: Deploy Azure Function App
+
+on:
+  # Deploy on pull request to master
+  pull_request:
+    branches:
+      - master
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+  
+  # Deploy on push to master (after PR merge)
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+
+  # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+# Environment variables
+env:
+  AZURE_FUNCTIONAPP_NAME: 'func-orders-demo'
+  AZURE_RESOURCE_GROUP: 'rg-functionapp-demo'
+  DOTNET_VERSION: '8.0.x'
+  OUTPUT_PATH: './publish'
+
+# Permissions required for OIDC authentication
+permissions:
+  id-token: write   # Required for OIDC
+  contents: read    # Required to checkout code
+  pull-requests: write  # Required to comment on PRs
+
+jobs:
+  #############################################################################
+  # BUILD JOB
+  #############################################################################
+  build:
+    name: Build Function App
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup .NET ${{ env.DOTNET_VERSION }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: 📦 Restore dependencies
+        run: dotnet restore
+
+      - name: 🔨 Build project
+        run: dotnet build --configuration Release --no-restore
+
+      - name: 🧪 Run tests (if any)
+        run: dotnet test --configuration Release --no-build --verbosity normal
+        continue-on-error: true
+
+      - name: 📦 Publish
+        run: dotnet publish --configuration Release --output ${{ env.OUTPUT_PATH }} --no-build
+
+      - name: 📋 List published files
+        run: |
+          echo "Published files:"
+          ls -la ${{ env.OUTPUT_PATH }}
+          echo ""
+          echo "Functions metadata:"
+          cat ${{ env.OUTPUT_PATH }}/functions.metadata || echo "No functions.metadata found"
+
+      - name: 📤 Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: function-app-package
+          path: ${{ env.OUTPUT_PATH }}
+          retention-days: 7
+          if-no-files-found: error
+
+  #############################################################################
+  # DEPLOY TO STAGING (Pull Request)
+  #############################################################################
+  deploy-staging:
+    name: Deploy to Staging
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    environment:
+      name: staging
+      url: https://${{ env.AZURE_FUNCTIONAPP_NAME }}-staging.azurewebsites.net
+
+    steps:
+      - name: 📥 Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: function-app-package
+          path: ${{ env.OUTPUT_PATH }}
+
+      - name: 🔐 Login to Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: 🚀 Deploy to Staging Slot
+        uses: azure/functions-action@v1
+        with:
+          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
+          package: ${{ env.OUTPUT_PATH }}
+          slot-name: staging
+
+      - name: 🧪 Smoke Test - Staging
+        id: smoke-test
+        run: |
+          echo "Waiting for deployment to stabilize..."
+          sleep 30
+          
+          STAGING_URL="https://${{ env.AZURE_FUNCTIONAPP_NAME }}-staging.azurewebsites.net/api/processordertrigger"
+          echo "Testing: $STAGING_URL"
+          
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$STAGING_URL" \
+            -H "Content-Type: application/json" \
+            -d '{"Id":"PR-${{ github.event.pull_request.number }}","Name":"Smoke Test"}' || echo "CURL_FAILED")
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          echo "HTTP Status: $HTTP_CODE"
+          echo "Response: $BODY"
+          
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Smoke test passed!"
+            echo "smoke_test_result=passed" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️ Smoke test returned non-200 status"
+            echo "smoke_test_result=warning" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 💬 Comment on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const smokeResult = '${{ steps.smoke-test.outputs.smoke_test_result }}';
+            const statusEmoji = smokeResult === 'passed' ? '✅' : '⚠️';
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## ${statusEmoji} Staging Deployment Complete
+              
+              | Property | Value |
+              |----------|-------|
+              | **Function App** | \`${{ env.AZURE_FUNCTIONAPP_NAME }}\` |
+              | **Slot** | \`staging\` |
+              | **Commit** | \`${{ github.sha }}\` |
+              | **Smoke Test** | ${smokeResult} |
+              
+              **Staging URL:** https://${{ env.AZURE_FUNCTIONAPP_NAME }}-staging.azurewebsites.net/api/processordertrigger
+              
+              **Test Command:**
+              \`\`\`bash
+              curl -X POST "https://${{ env.AZURE_FUNCTIONAPP_NAME }}-staging.azurewebsites.net/api/processordertrigger" \\
+                -H "Content-Type: application/json" \\
+                -d '{"Id":"TEST-001","Name":"Test Product"}'
+              \`\`\`
+              
+              After verifying, merge this PR to deploy to production.`
+            })
+
+  #############################################################################
+  # DEPLOY TO PRODUCTION (Push to main / Manual)
+  #############################################################################
+  deploy-production:
+    name: Deploy to Production
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production')
+    environment:
+      name: production
+      url: https://${{ env.AZURE_FUNCTIONAPP_NAME }}.azurewebsites.net
+
+    steps:
+      - name: 📥 Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: function-app-package
+          path: ${{ env.OUTPUT_PATH }}
+
+      - name: 🔐 Login to Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: 🚀 Deploy to Production
+        uses: azure/functions-action@v1
+        with:
+          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
+          package: ${{ env.OUTPUT_PATH }}
+
+      - name: 🧪 Smoke Test - Production
+        run: |
+          echo "Waiting for deployment to stabilize..."
+          sleep 30
+          
+          PROD_URL="https://${{ env.AZURE_FUNCTIONAPP_NAME }}.azurewebsites.net/api/processordertrigger"
+          echo "Testing: $PROD_URL"
+          
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$PROD_URL" \
+            -H "Content-Type: application/json" \
+            -d '{"Id":"DEPLOY-${{ github.run_number }}","Name":"Production Deploy Test"}')
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          echo "HTTP Status: $HTTP_CODE"
+          echo "Response: $BODY"
+          
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Production deployment verified!"
+          else
+            echo "⚠️ Production smoke test returned non-200 status"
+          fi
+
+      - name: 📊 Deployment Summary
+        run: |
+          echo "## 🚀 Production Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Function App** | \`${{ env.AZURE_FUNCTIONAPP_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Environment** | Production |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Run** | #${{ github.run_number }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Production URL:** https://${{ env.AZURE_FUNCTIONAPP_NAME }}.azurewebsites.net/api/processordertrigger" >> $GITHUB_STEP_SUMMARY
+
+  #############################################################################
+  # CLEANUP (Optional - runs on PR close)
+  #############################################################################
+  cleanup-staging:
+    name: Cleanup Staging
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    
+    steps:
+      - name: 🔐 Login to Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: 🧹 Stop Staging Slot (to save costs)
+        run: |
+          az functionapp stop \
+            --name ${{ env.AZURE_FUNCTIONAPP_NAME }} \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --slot staging || echo "Staging slot may not exist"

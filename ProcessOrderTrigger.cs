@@ -39,7 +39,7 @@ public class ProcessOrderTrigger
     /// <summary>
     /// HTTP Trigger that receives an order request and sends a message to Service Bus
     /// Input: {"Id":"...","Name":"..."}
-    /// Output: {"TransactionId":"...","ProductName":"...","CreatedAt":"..."}
+    /// Output: {"TransactionId":"...","ProductName":"...","CreatedAt":"...","MessageId":"..."}
     /// </summary>
     [Function("ProcessOrderTrigger")]
     public async Task<ProcessOrderOutput> Run(
@@ -69,12 +69,12 @@ public class ProcessOrderTrigger
 
         _logger.LogInformation("Received order - Id: {Id}, Name: {Name}", orderRequest.Id, orderRequest.Name);
 
-        // STEP 4: MAP input to Service Bus message format
-        // Id -> TransactionId, Name -> ProductName
+        // STEP 4: MAP input to Service Bus message format with unique MessageId
         var serviceBusMessage = new ServiceBusOrderMessage
         {
-            TransactionId = orderRequest.Id,      // Mapped from Id
-            ProductName = orderRequest.Name,      // Mapped from Name
+            MessageId = Guid.NewGuid().ToString(),
+            TransactionId = orderRequest.Id,
+            ProductName = orderRequest.Name,
             CreatedAt = DateTime.UtcNow
         };
 
@@ -89,11 +89,15 @@ public class ProcessOrderTrigger
         {
             HttpResponse = new OkObjectResult(new 
             { 
-                Status = "Message sent to Service Bus",
+                Success = true,
+                Message = "Message successfully sent to Service Bus",
                 QueueName = "orders",
-                Message = serviceBusMessage 
+                MessageId = serviceBusMessage.MessageId,
+                TransactionId = serviceBusMessage.TransactionId,
+                ProductName = serviceBusMessage.ProductName,
+                CreatedAt = serviceBusMessage.CreatedAt
             }),
-            ServiceBusMessage = messageJson  // <-- THIS IS SENT TO SERVICE BUS AUTOMATICALLY
+            ServiceBusMessage = messageJson
         };
     }
 }
