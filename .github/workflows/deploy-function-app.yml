@@ -129,7 +129,9 @@ jobs:
         run: dotnet build FunctionAppDemos.csproj --configuration Release --no-restore
 
       - name: 📦 Publish
-        run: dotnet publish FunctionAppDemos.csproj --configuration Release --output ${{ env.OUTPUT_PATH }} --no-build
+        run: |
+          # Full publish (without --no-build to ensure all artifacts are generated)
+          dotnet publish FunctionAppDemos.csproj --configuration Release --output ${{ env.OUTPUT_PATH }}
 
       - name: ✅ Verify published files
         run: |
@@ -157,6 +159,17 @@ jobs:
             echo "❌ host.json MISSING!"
             exit 1
           fi
+          echo ""
+          echo "===== Checking .azurefunctions folder (required for isolated worker) ====="
+          if [ -d "${{ env.OUTPUT_PATH }}/.azurefunctions" ]; then
+            echo "✅ .azurefunctions folder exists"
+            echo "Contents:"
+            ls -la ${{ env.OUTPUT_PATH }}/.azurefunctions
+          else
+            echo "❌ .azurefunctions folder MISSING! This is required for .NET isolated worker functions."
+            echo "Build may have failed to generate worker extensions."
+            exit 1
+          fi
 
       - name: 📤 Upload artifact
         uses: actions/upload-artifact@v4
@@ -165,6 +178,7 @@ jobs:
           path: ${{ env.OUTPUT_PATH }}
           retention-days: 7
           if-no-files-found: error
+          include-hidden-files: true  # Include .azurefunctions folder
 
   #############################################################################
   # DEPLOY TO STAGING (Pull Request)
@@ -184,6 +198,18 @@ jobs:
         with:
           name: function-app-package
           path: ${{ env.OUTPUT_PATH }}
+
+      - name: ✅ Verify downloaded artifact
+        run: |
+          echo "===== Downloaded files ====="
+          ls -la ${{ env.OUTPUT_PATH }}
+          echo ""
+          if [ -d "${{ env.OUTPUT_PATH }}/.azurefunctions" ]; then
+            echo "✅ .azurefunctions folder exists in artifact"
+          else
+            echo "❌ .azurefunctions folder MISSING from artifact!"
+            exit 1
+          fi
 
       - name: 🔐 Login to Azure (OIDC)
         uses: azure/login@v2
@@ -276,6 +302,18 @@ jobs:
         with:
           name: function-app-package
           path: ${{ env.OUTPUT_PATH }}
+
+      - name: ✅ Verify downloaded artifact
+        run: |
+          echo "===== Downloaded files ====="
+          ls -la ${{ env.OUTPUT_PATH }}
+          echo ""
+          if [ -d "${{ env.OUTPUT_PATH }}/.azurefunctions" ]; then
+            echo "✅ .azurefunctions folder exists in artifact"
+          else
+            echo "❌ .azurefunctions folder MISSING from artifact!"
+            exit 1
+          fi
 
       - name: 🔐 Login to Azure (OIDC)
         uses: azure/login@v2
