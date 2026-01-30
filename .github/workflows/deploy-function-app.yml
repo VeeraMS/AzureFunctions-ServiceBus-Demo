@@ -114,10 +114,10 @@ jobs:
       - name: 🧹 Clean any cached artifacts
         run: |
           rm -rf obj bin publish
-          dotnet clean --configuration Release || true
+          dotnet clean FunctionAppDemos.csproj --configuration Release || true
 
       - name: 📦 Publish (restore + build + publish)
-        run: dotnet publish --configuration Release --output ${{ env.OUTPUT_PATH }}
+        run: dotnet publish FunctionAppDemos.csproj --configuration Release --output ${{ env.OUTPUT_PATH }}
 
       - name: 📋 List published files
         run: |
