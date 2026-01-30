@@ -111,21 +111,52 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      - name: 🧹 Clean any cached artifacts
+      - name: 🧹 Clean ALL previous build artifacts
         run: |
-          rm -rf obj bin publish
-          dotnet clean FunctionAppDemos.csproj --configuration Release || true
+          echo "Removing all build artifacts..."
+          rm -rf obj bin publish .vs
+          rm -rf **/obj **/bin
+          rm -f *.zip
+          find . -name "*.nupkg" -delete 2>/dev/null || true
+          find . -name "WorkerExtensions.csproj" -delete 2>/dev/null || true
+          echo "Clean complete!"
+          ls -la
 
-      - name: 📦 Publish (restore + build + publish)
-        run: dotnet publish FunctionAppDemos.csproj --configuration Release --output ${{ env.OUTPUT_PATH }}
+      - name: 📦 Restore packages
+        run: dotnet restore FunctionAppDemos.csproj --force --no-cache
 
-      - name: 📋 List published files
+      - name: 🔨 Build project
+        run: dotnet build FunctionAppDemos.csproj --configuration Release --no-restore
+
+      - name: 📦 Publish
+        run: dotnet publish FunctionAppDemos.csproj --configuration Release --output ${{ env.OUTPUT_PATH }} --no-build
+
+      - name: ✅ Verify published files
         run: |
-          echo "Published files:"
+          echo "===== Published files ====="
           ls -la ${{ env.OUTPUT_PATH }}
           echo ""
-          echo "Functions metadata:"
-          cat ${{ env.OUTPUT_PATH }}/functions.metadata || echo "No functions.metadata found"
+          echo "===== Checking required files ====="
+          if [ -f "${{ env.OUTPUT_PATH }}/FunctionAppDemos.dll" ]; then
+            echo "✅ FunctionAppDemos.dll exists"
+          else
+            echo "❌ FunctionAppDemos.dll MISSING!"
+            exit 1
+          fi
+          if [ -f "${{ env.OUTPUT_PATH }}/functions.metadata" ]; then
+            echo "✅ functions.metadata exists"
+            echo "===== Functions metadata content ====="
+            cat ${{ env.OUTPUT_PATH }}/functions.metadata
+          else
+            echo "❌ functions.metadata MISSING!"
+            exit 1
+          fi
+          if [ -f "${{ env.OUTPUT_PATH }}/host.json" ]; then
+            echo "✅ host.json exists"
+          else
+            echo "❌ host.json MISSING!"
+            exit 1
+          fi
 
       - name: 📤 Upload artifact
         uses: actions/upload-artifact@v4
