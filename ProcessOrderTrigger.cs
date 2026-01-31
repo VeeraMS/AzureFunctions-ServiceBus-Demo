@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Azure.Messaging.ServiceBus;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Functions.Worker;
@@ -7,97 +8,121 @@ using Ecommerce.Functions.Models;
 
 namespace Ecommerce.Functions;
 
-/// <summary>
-/// Output class for multiple return values (HTTP response + Service Bus message)
-/// </summary>
-public class ProcessOrderOutput
-{
-    /// <summary>
-    /// SERVICE BUS OUTPUT BINDING:
-    /// - "orders" = Queue name
-    /// - Connection = Name of connection string in local.settings.json
-    /// When function returns, runtime reads this property and sends to Service Bus
-    /// </summary>
-    [ServiceBusOutput("orders", Connection = "ServiceBusConnection")]
-    public string? ServiceBusMessage { get; set; }
-
-    /// <summary>
-    /// HTTP Response returned to the caller
-    /// </summary>
-    public IActionResult? HttpResponse { get; set; }
-}
-
 public class ProcessOrderTrigger
 {
     private readonly ILogger<ProcessOrderTrigger> _logger;
+    private readonly ServiceBusSender _serviceBusSender;
 
-    public ProcessOrderTrigger(ILogger<ProcessOrderTrigger> logger)
+    // ============================================================================
+    // STEP 3: Constructor Injection
+    // ============================================================================
+    // ServiceBusSender is injected by DI (registered in Program.cs)
+    // - Already configured for "orders" queue
+    // - Uses Managed Identity authentication
+    // - Singleton instance (connection reused across requests)
+    // ============================================================================
+    public ProcessOrderTrigger(ILogger<ProcessOrderTrigger> logger, ServiceBusSender serviceBusSender)
     {
         _logger = logger;
+        _serviceBusSender = serviceBusSender;
     }
 
     /// <summary>
     /// HTTP Trigger that receives an order request and sends a message to Service Bus
     /// Input: {"Id":"...","Name":"..."}
-    /// Output: {"TransactionId":"...","ProductName":"...","CreatedAt":"...","MessageId":"..."}
+    /// Output: {"success":true,"messageId":"...","transactionId":"...","productName":"...","createdAt":"..."}
     /// </summary>
     [Function("ProcessOrderTrigger")]
-    public async Task<ProcessOrderOutput> Run(
+    public async Task<IActionResult> Run(
         [HttpTrigger(AuthorizationLevel.Anonymous, "post")] HttpRequest req)
     {
         _logger.LogInformation("Processing order request...");
 
-        // STEP 1: Read HTTP request body
-        string requestBody = await new StreamReader(req.Body).ReadToEndAsync();
-        
-        // STEP 2: Deserialize JSON to OrderRequest model
-        var orderRequest = JsonSerializer.Deserialize<OrderRequest>(requestBody, new JsonSerializerOptions
+        try
         {
-            PropertyNameCaseInsensitive = true
-        });
-
-        // STEP 3: Validate input
-        if (orderRequest == null || string.IsNullOrEmpty(orderRequest.Id) || string.IsNullOrEmpty(orderRequest.Name))
-        {
-            _logger.LogWarning("Invalid request: Id and Name are required");
-            return new ProcessOrderOutput
+            // STEP 1: Read HTTP request body
+            string requestBody = await new StreamReader(req.Body).ReadToEndAsync();
+            
+            // STEP 2: Deserialize JSON to OrderRequest model
+            var orderRequest = JsonSerializer.Deserialize<OrderRequest>(requestBody, new JsonSerializerOptions
             {
-                HttpResponse = new BadRequestObjectResult("Invalid request: Id and Name are required"),
-                ServiceBusMessage = null  // Don't send to Service Bus on error
+                PropertyNameCaseInsensitive = true
+            });
+
+            // STEP 3: Validate input
+            if (orderRequest == null || string.IsNullOrEmpty(orderRequest.Id) || string.IsNullOrEmpty(orderRequest.Name))
+            {
+                _logger.LogWarning("Invalid request: Id and Name are required");
+                return new BadRequestObjectResult(new 
+                { 
+                    success = false,
+                    error = "Invalid request: Id and Name are required" 
+                });
+            }
+
+            _logger.LogInformation("Received order - Id: {Id}, Name: {Name}", orderRequest.Id, orderRequest.Name);
+
+            // STEP 4: Create Service Bus message with unique MessageId
+            var serviceBusMessage = new ServiceBusOrderMessage
+            {
+                MessageId = Guid.NewGuid().ToString(),
+                TransactionId = orderRequest.Id,
+                ProductName = orderRequest.Name,
+                CreatedAt = DateTime.UtcNow
+            };
+
+            // STEP 5: Serialize to JSON
+            var messageJson = JsonSerializer.Serialize(serviceBusMessage);
+            _logger.LogInformation("Service Bus Message: {Message}", messageJson);
+
+            // STEP 6: Send to Service Bus using injected sender
+            var message = new ServiceBusMessage(messageJson)
+            {
+                MessageId = serviceBusMessage.MessageId,
+                ContentType = "application/json"
+            };
+            
+            await _serviceBusSender.SendMessageAsync(message);
+            _logger.LogInformation("Message sent to Service Bus successfully. MessageId: {MessageId}", serviceBusMessage.MessageId);
+
+            // STEP 7: Return success response with full details
+            return new OkObjectResult(new 
+            { 
+                success = true,
+                message = "Order queued successfully",
+                queueName = "orders",
+                messageId = serviceBusMessage.MessageId,
+                transactionId = serviceBusMessage.TransactionId,
+                productName = serviceBusMessage.ProductName,
+                createdAt = serviceBusMessage.CreatedAt
+            });
+        }
+        catch (ServiceBusException sbEx)
+        {
+            // Handle Service Bus specific errors
+            _logger.LogError(sbEx, "Service Bus error: {Message}", sbEx.Message);
+            return new ObjectResult(new 
+            { 
+                success = false,
+                error = "Failed to queue order",
+                details = sbEx.Reason.ToString()
+            }) 
+            { 
+                StatusCode = StatusCodes.Status503ServiceUnavailable 
             };
         }
-
-        _logger.LogInformation("Received order - Id: {Id}, Name: {Name}", orderRequest.Id, orderRequest.Name);
-
-        // STEP 4: MAP input to Service Bus message format with unique MessageId
-        var serviceBusMessage = new ServiceBusOrderMessage
+        catch (Exception ex)
         {
-            MessageId = Guid.NewGuid().ToString(),
-            TransactionId = orderRequest.Id,
-            ProductName = orderRequest.Name,
-            CreatedAt = DateTime.UtcNow
-        };
-
-        // STEP 5: Serialize to JSON for Service Bus
-        var messageJson = JsonSerializer.Serialize(serviceBusMessage);
-        _logger.LogInformation("Service Bus Message: {Message}", messageJson);
-
-        // STEP 6: Return output - Azure Functions runtime will:
-        //   a) Send HttpResponse back to HTTP caller
-        //   b) Send ServiceBusMessage to the "orders" queue (AUTOMATICALLY!)
-        return new ProcessOrderOutput
-        {
-            HttpResponse = new OkObjectResult(new 
+            // Handle unexpected errors
+            _logger.LogError(ex, "Unexpected error: {Message}", ex.Message);
+            return new ObjectResult(new 
             { 
-                Success = true,
-                Message = "Message successfully sent to Service Bus",
-                QueueName = "orders",
-                MessageId = serviceBusMessage.MessageId,
-                TransactionId = serviceBusMessage.TransactionId,
-                ProductName = serviceBusMessage.ProductName,
-                CreatedAt = serviceBusMessage.CreatedAt
-            }),
-            ServiceBusMessage = messageJson
-        };
+                success = false,
+                error = "Internal server error"
+            }) 
+            { 
+                StatusCode = StatusCodes.Status500InternalServerError 
+            };
+        }
     }
 }
