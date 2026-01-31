@@ -246,11 +246,26 @@ jobs:
             exit 1
           fi
 
+      - name: 📋 Staging Summary
+        run: |
+          echo "## 🔵 Staging Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **Staging is ready for production swap**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Staging URL** | https://${{ env.AZURE_FUNCTIONAPP_NAME }}-staging.azurewebsites.net/api/processordertrigger |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "⏳ **Waiting for approval to swap to production...**" >> $GITHUB_STEP_SUMMARY
+
   #############################################################################
-  # SWAP: Staging → Production (Zero-downtime)
+  # SWAP: Staging → Production (Requires Approval)
+  # The 'production' environment must have "Required reviewers" configured
+  # in GitHub Settings → Environments → production → Protection rules
   #############################################################################
   swap-to-production:
-    name: 🟢 Swap to Production
+    name: 🟢 Swap to Production (Approval Required)
     needs: deploy-staging
     runs-on: ubuntu-latest
     environment:
