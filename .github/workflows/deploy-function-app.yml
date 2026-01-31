@@ -53,21 +53,15 @@
 name: Deploy Azure Function App
 
 on:
-  # Deploy on pull request to master
-  pull_request:
-    branches:
-      - master
-    paths-ignore:
-      - '**.md'
-      - '.gitignore'
-  
-  # Deploy on push to master (after PR merge)
+  # Deploy ONLY on push to master (after PR merge)
+  # This triggers when a PR is merged or when commits are pushed to master
   push:
     branches:
       - master
     paths-ignore:
       - '**.md'
       - '.gitignore'
+      - 'setup-*.ps1'
 
   # Allow manual trigger
   workflow_dispatch:
@@ -181,117 +175,12 @@ jobs:
           include-hidden-files: true  # Include .azurefunctions folder
 
   #############################################################################
-  # DEPLOY TO STAGING (Pull Request)
-  #############################################################################
-  deploy-staging:
-    name: Deploy to Staging
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    environment:
-      name: staging
-      url: https://${{ env.AZURE_FUNCTIONAPP_NAME }}-staging.azurewebsites.net
-
-    steps:
-      - name: 📥 Download artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: function-app-package
-          path: ${{ env.OUTPUT_PATH }}
-
-      - name: ✅ Verify downloaded artifact
-        run: |
-          echo "===== Downloaded files ====="
-          ls -la ${{ env.OUTPUT_PATH }}
-          echo ""
-          if [ -d "${{ env.OUTPUT_PATH }}/.azurefunctions" ]; then
-            echo "✅ .azurefunctions folder exists in artifact"
-          else
-            echo "❌ .azurefunctions folder MISSING from artifact!"
-            exit 1
-          fi
-
-      - name: 🔐 Login to Azure (OIDC)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: 🚀 Deploy to Staging Slot
-        uses: azure/functions-action@v1
-        with:
-          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
-          package: ${{ env.OUTPUT_PATH }}
-          slot-name: staging
-
-      - name: 🧪 Smoke Test - Staging
-        id: smoke-test
-        run: |
-          echo "Waiting for deployment to stabilize..."
-          sleep 30
-          
-          STAGING_URL="https://${{ env.AZURE_FUNCTIONAPP_NAME }}-staging.azurewebsites.net/api/processordertrigger"
-          echo "Testing: $STAGING_URL"
-          
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$STAGING_URL" \
-            -H "Content-Type: application/json" \
-            -d '{"Id":"PR-${{ github.event.pull_request.number }}","Name":"Smoke Test"}' || echo "CURL_FAILED")
-          
-          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-          BODY=$(echo "$RESPONSE" | sed '$d')
-          
-          echo "HTTP Status: $HTTP_CODE"
-          echo "Response: $BODY"
-          
-          if [ "$HTTP_CODE" = "200" ]; then
-            echo "✅ Smoke test passed!"
-            echo "smoke_test_result=passed" >> $GITHUB_OUTPUT
-          else
-            echo "⚠️ Smoke test returned non-200 status"
-            echo "smoke_test_result=warning" >> $GITHUB_OUTPUT
-          fi
-
-      - name: 💬 Comment on PR
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const smokeResult = '${{ steps.smoke-test.outputs.smoke_test_result }}';
-            const statusEmoji = smokeResult === 'passed' ? '✅' : '⚠️';
-            
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: `## ${statusEmoji} Staging Deployment Complete
-              
-              | Property | Value |
-              |----------|-------|
-              | **Function App** | \`${{ env.AZURE_FUNCTIONAPP_NAME }}\` |
-              | **Slot** | \`staging\` |
-              | **Commit** | \`${{ github.sha }}\` |
-              | **Smoke Test** | ${smokeResult} |
-              
-              **Staging URL:** https://${{ env.AZURE_FUNCTIONAPP_NAME }}-staging.azurewebsites.net/api/processordertrigger
-              
-              **Test Command:**
-              \`\`\`bash
-              curl -X POST "https://${{ env.AZURE_FUNCTIONAPP_NAME }}-staging.azurewebsites.net/api/processordertrigger" \\
-                -H "Content-Type: application/json" \\
-                -d '{"Id":"TEST-001","Name":"Test Product"}'
-              \`\`\`
-              
-              After verifying, merge this PR to deploy to production.`
-            })
-
-  #############################################################################
-  # DEPLOY TO PRODUCTION (Push to main / Manual)
+  # DEPLOY TO PRODUCTION (After PR merge to master)
   #############################################################################
   deploy-production:
     name: Deploy to Production
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production')
     environment:
       name: production
       url: https://${{ env.AZURE_FUNCTIONAPP_NAME }}.azurewebsites.net
@@ -364,26 +253,3 @@ jobs:
           echo "| **Run** | #${{ github.run_number }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Production URL:** https://${{ env.AZURE_FUNCTIONAPP_NAME }}.azurewebsites.net/api/processordertrigger" >> $GITHUB_STEP_SUMMARY
-
-  #############################################################################
-  # CLEANUP (Optional - runs on PR close)
-  #############################################################################
-  cleanup-staging:
-    name: Cleanup Staging
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && github.event.action == 'closed'
-    
-    steps:
-      - name: 🔐 Login to Azure (OIDC)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: 🧹 Stop Staging Slot (to save costs)
-        run: |
-          az functionapp stop \
-            --name ${{ env.AZURE_FUNCTIONAPP_NAME }} \
-            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
-            --slot staging || echo "Staging slot may not exist"

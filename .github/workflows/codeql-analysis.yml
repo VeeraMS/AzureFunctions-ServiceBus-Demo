@@ -2,19 +2,27 @@
 # GitHub Actions Workflow - CodeQL Security Scanning
 #
 # Analyzes code for security vulnerabilities and coding errors
+# Runs on: PRs to master (must pass before merge)
 # Part of GitHub Advanced Security
 #############################################################################
 
 name: "CodeQL Security Scan"
 
 on:
-  push:
-    branches: [ master, dev ]
+  # Run on PRs to master (validates code before merge)
   pull_request:
     branches: [ master ]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+      - 'setup-*.ps1'
+  
+  # Weekly scheduled scan
   schedule:
-    # Run weekly on Sundays at midnight
     - cron: '0 0 * * 0'
+
+  # Manual trigger
+  workflow_dispatch:
 
 jobs:
   analyze:
