@@ -10,6 +10,7 @@ namespace Ecommerce.Functions;
 
 public class ProcessOrderTrigger
 {
+    private const string AppVersion = "2.0.0";  // Version for tracking deployments
     private readonly ILogger<ProcessOrderTrigger> _logger;
     private readonly ServiceBusSender _serviceBusSender;
 
@@ -36,7 +37,7 @@ public class ProcessOrderTrigger
     public async Task<IActionResult> Run(
         [HttpTrigger(AuthorizationLevel.Anonymous, "post")] HttpRequest req)
     {
-        _logger.LogInformation("Processing order request...");
+        _logger.LogInformation("🚀 ProcessOrderTrigger v{Version} - Processing order request...", AppVersion);
 
         try
         {
@@ -89,6 +90,7 @@ public class ProcessOrderTrigger
             return new OkObjectResult(new 
             { 
                 success = true,
+                version = AppVersion,  // Added version to track which slot is serving
                 message = "Order queued successfully",
                 queueName = "orders",
                 messageId = serviceBusMessage.MessageId,
