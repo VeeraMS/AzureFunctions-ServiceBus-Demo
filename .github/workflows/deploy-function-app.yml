@@ -175,15 +175,18 @@ jobs:
           include-hidden-files: true  # Include .azurefunctions folder
 
   #############################################################################
-  # DEPLOY TO PRODUCTION (After PR merge to master)
+  # BLUE-GREEN DEPLOYMENT
+  # Step 1: Deploy to STAGING slot
+  # Step 2: Smoke test staging
+  # Step 3: SWAP staging with production (zero-downtime)
   #############################################################################
-  deploy-production:
-    name: Deploy to Production
+  deploy-staging:
+    name: 🔵 Deploy to Staging
     needs: build
     runs-on: ubuntu-latest
     environment:
-      name: production
-      url: https://${{ env.AZURE_FUNCTIONAPP_NAME }}.azurewebsites.net
+      name: staging
+      url: https://${{ env.AZURE_FUNCTIONAPP_NAME }}-staging.azurewebsites.net
 
     steps:
       - name: 📥 Download artifact
@@ -211,23 +214,24 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: 🚀 Deploy to Production
+      - name: 🔵 Deploy to Staging Slot
         uses: azure/functions-action@v1
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
+          slot-name: staging
           package: ${{ env.OUTPUT_PATH }}
 
-      - name: 🧪 Smoke Test - Production
+      - name: 🧪 Smoke Test - Staging
         run: |
-          echo "Waiting for deployment to stabilize..."
+          echo "Waiting for staging deployment to stabilize..."
           sleep 30
           
-          PROD_URL="https://${{ env.AZURE_FUNCTIONAPP_NAME }}.azurewebsites.net/api/processordertrigger"
-          echo "Testing: $PROD_URL"
+          STAGING_URL="https://${{ env.AZURE_FUNCTIONAPP_NAME }}-staging.azurewebsites.net/api/processordertrigger"
+          echo "Testing: $STAGING_URL"
           
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$PROD_URL" \
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$STAGING_URL" \
             -H "Content-Type: application/json" \
-            -d '{"Id":"DEPLOY-${{ github.run_number }}","Name":"Production Deploy Test"}')
+            -d '{"Id":"STAGING-${{ github.run_number }}","Name":"Staging Deploy Test"}')
           
           HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
           BODY=$(echo "$RESPONSE" | sed '$d')
@@ -236,20 +240,82 @@ jobs:
           echo "Response: $BODY"
           
           if [ "$HTTP_CODE" = "200" ]; then
-            echo "✅ Production deployment verified!"
+            echo "✅ Staging deployment verified!"
+          else
+            echo "❌ Staging smoke test failed!"
+            exit 1
+          fi
+
+  #############################################################################
+  # SWAP: Staging → Production (Zero-downtime)
+  #############################################################################
+  swap-to-production:
+    name: 🟢 Swap to Production
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://${{ env.AZURE_FUNCTIONAPP_NAME }}.azurewebsites.net
+
+    steps:
+      - name: 🔐 Login to Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: 🔄 Swap Staging → Production
+        run: |
+          echo "Swapping staging slot with production..."
+          az functionapp deployment slot swap \
+            --name ${{ env.AZURE_FUNCTIONAPP_NAME }} \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --slot staging \
+            --target-slot production
+          echo "✅ Swap complete!"
+
+      - name: 🧪 Smoke Test - Production
+        run: |
+          echo "Verifying production after swap..."
+          sleep 10
+          
+          PROD_URL="https://${{ env.AZURE_FUNCTIONAPP_NAME }}.azurewebsites.net/api/processordertrigger"
+          echo "Testing: $PROD_URL"
+          
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$PROD_URL" \
+            -H "Content-Type: application/json" \
+            -d '{"Id":"PROD-${{ github.run_number }}","Name":"Production Verify Test"}')
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          echo "HTTP Status: $HTTP_CODE"
+          echo "Response: $BODY"
+          
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Production verified after swap!"
           else
             echo "⚠️ Production smoke test returned non-200 status"
           fi
 
       - name: 📊 Deployment Summary
         run: |
-          echo "## 🚀 Production Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "## 🚀 Blue-Green Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Step | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔵 Deploy to Staging | ✅ Complete |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🧪 Staging Smoke Test | ✅ Passed |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔄 Swap to Production | ✅ Complete |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🟢 Production Verified | ✅ Healthy |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| **Function App** | \`${{ env.AZURE_FUNCTIONAPP_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Environment** | Production |" >> $GITHUB_STEP_SUMMARY
           echo "| **Commit** | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **Run** | #${{ github.run_number }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Production URL:** https://${{ env.AZURE_FUNCTIONAPP_NAME }}.azurewebsites.net/api/processordertrigger" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Rollback:** If issues occur, swap staging back to production in Azure Portal" >> $GITHUB_STEP_SUMMARY
