@@ -1,0 +1,56 @@
+#############################################################################
+# GitHub Actions Workflow - CodeQL Security Scanning
+#
+# Analyzes code for security vulnerabilities and coding errors
+# Part of GitHub Advanced Security
+#############################################################################
+
+name: "CodeQL Security Scan"
+
+on:
+  push:
+    branches: [ master, dev ]
+  pull_request:
+    branches: [ master ]
+  schedule:
+    # Run weekly on Sundays at midnight
+    - cron: '0 0 * * 0'
+
+jobs:
+  analyze:
+    name: Analyze Code
+    runs-on: ubuntu-latest
+    
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'csharp' ]
+
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: 🔍 Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          # Use security-extended for more comprehensive scanning
+          queries: security-extended
+
+      - name: 🔨 Build project
+        run: dotnet build FunctionAppDemos.csproj --configuration Release
+
+      - name: 🔎 Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
